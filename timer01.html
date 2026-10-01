@@ -1,0 +1,192 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ハチ時計</title>
+<style>
+*{box-sizing:border-box}
+body{margin:0;padding:20px 12px 48px;font-family:-apple-system,"Hiragino Sans","Yu Gothic",sans-serif;background:#f4f7fa;color:#333;text-align:center}
+#list{display:flex;flex-direction:column;align-items:center;gap:12px}
+.card{width:100%;max-width:380px;background:#fff;border:1px solid #dde3ea;border-radius:12px;padding:10px 10px 12px;display:flex;flex-direction:column;align-items:center;gap:6px}
+.head{width:100%;display:grid;grid-template-columns:1fr auto 1fr;align-items:start}
+.head .modes{justify-self:start}
+.head .hr{justify-self:end;display:flex;gap:4px}
+.name{font-size:12px;color:#667;padding-top:4px}
+.disp{font-size:38px;font-weight:700;font-variant-numeric:tabular-nums;line-height:1.1}
+.card.run .disp{color:#2a8fd6}
+.hint{font-size:11px;color:#999;height:14px;line-height:14px}
+.row{display:flex;flex-wrap:wrap;justify-content:center;align-items:center;gap:4px}
+button{font:inherit;font-size:12px;border:none;border-radius:6px;background:#5BBAF8;color:#fff;padding:5px 9px;cursor:pointer;min-width:32px}
+button.sub{background:#e4e9ee;color:#445}
+button.stop{background:#e8735f;color:#fff}
+button:disabled{background:#c5ccd3;color:#fff;cursor:not-allowed}
+button.sub:disabled{background:#eef0f2;color:#aab}
+.go{padding:6px 22px;font-size:13px}
+input{width:60px;font:inherit;font-size:14px;text-align:center;padding:5px 2px;border:1px solid #ccd3da;border-radius:6px}
+input:disabled{background:#eef0f2}
+.unit{font-size:12px;color:#667}
+.modes{width:124px;display:flex;flex-direction:column;gap:3px}
+.seg{display:flex}
+.modes button{flex:1 1 0;min-width:0;background:#e4e9ee;color:#445;border-radius:0;padding:4px 0;font-size:11px}
+.seg button:first-child{border-radius:6px 0 0 6px}
+.seg button:last-child{border-radius:0 6px 6px 0}
+.modes .pomo{border-radius:6px;width:100%;flex:none}
+.modes button.on{background:#5BBAF8;color:#fff}
+.modes button:disabled{background:#eef0f2;color:#aab}
+.modes button.on:disabled{background:#9fd3f6;color:#fff}
+#add{margin-top:14px;width:100%;max-width:380px;font-size:18px;padding:6px}
+</style>
+</head>
+<body>
+<div id="list"></div>
+<button id="add" type="button">＋</button>
+
+<script>
+const DEFAULT_COUNT = 3, MAX_MIN = 999, WARN_MS = 10000, WORK_MIN = 25, BREAK_MIN = 5;
+const list = document.getElementById('list');
+const timers = [];
+let ac = null;
+
+function audio(){
+  if(!ac) ac = new (window.AudioContext || window.webkitAudioContext)();
+  if(ac.state === 'suspended') ac.resume();
+  return ac;
+}
+function beep(vol, freqs, type){
+  const c = audio();
+  freqs.forEach((f, i) => {
+    const t = c.currentTime + i * 0.3;
+    const o = c.createOscillator(), g = c.createGain();
+    o.type = type; o.frequency.value = f;
+    g.gain.setValueAtTime(0, t);
+    g.gain.linearRampToValueAtTime(vol, t + 0.02);
+    g.gain.linearRampToValueAtTime(0, t + 0.22);
+    o.connect(g); g.connect(c.destination);
+    o.start(t); o.stop(t + 0.25);
+  });
+}
+const SOUND = {
+  normal: {warn: [880], end: [880, 880, 880], type: 'sine'},
+  pomo:   {warn: [523], end: [523, 659, 784], type: 'triangle'}
+};
+const fmt = ms => {
+  const s = Math.max(0, Math.ceil(ms / 1000));
+  return String(Math.floor(s / 60)).padStart(2, '0') + ':' + String(s % 60).padStart(2, '0');
+};
+
+function makeTimer(n){
+  const T = {mins: 0, running: false, mode: 'normal', phase: 'work', endAt: 0, warned: false};
+  const card = document.createElement('div');
+  card.className = 'card';
+  card.innerHTML =
+    '<div class="head">' +
+      '<div class="modes">' +
+        '<div class="seg">' +
+          '<button data-m="normal" class="on">通常</button>' +
+          '<button data-m="repeat">繰り返し</button>' +
+        '</div>' +
+        '<button data-m="pomo" class="pomo">ポモドーロ</button>' +
+      '</div>' +
+      '<div class="name">タイマー ' + n + '</div>' +
+      '<div class="hr">' +
+        '<button class="sub reset">リセット</button>' +
+        '<button class="stop">ストップ</button>' +
+      '</div>' +
+    '</div>' +
+    '<div class="disp">00:00</div>' +
+    '<div class="hint"></div>' +
+    '<div class="row">' +
+      '<button class="sub" data-d="-5">−5分</button>' +
+      '<button class="sub" data-d="-1">−1分</button>' +
+      '<input type="number" inputmode="numeric" min="0" max="' + MAX_MIN + '" value="0" aria-label="分">' +
+      '<span class="unit">分</span>' +
+      '<button class="sub" data-d="1">＋1分</button>' +
+      '<button class="sub" data-d="5">＋5分</button>' +
+    '</div>' +
+    '<button class="go">スタート</button>';
+  const $ = s => card.querySelector(s);
+  const disp = $('.disp'), hint = $('.hint'), inp = $('input'), go = $('.go'), stop = $('.stop'), reset = $('.reset');
+  const editBtns = card.querySelectorAll('[data-d]');
+  const modeBtns = card.querySelectorAll('[data-m]');
+
+  T.draw = function(){
+    const pomo = T.mode === 'pomo';
+    const shown = pomo ? (T.phase === 'work' ? WORK_MIN : BREAK_MIN) : T.mins;
+    card.classList.toggle('run', T.running);
+    disp.textContent = T.running ? fmt(T.endAt - Date.now()) : fmt((pomo ? WORK_MIN : T.mins) * 60000);
+    if(pomo){
+      hint.textContent = T.running ? (T.phase === 'work' ? '作業中' : '休憩中') : '';
+    } else {
+      const h = Math.floor(T.mins / 60);
+      hint.textContent = T.mins >= 60 ? '(' + h + '時間' + String(T.mins % 60).padStart(2, '0') + '分)' : '';
+    }
+    inp.value = shown;
+    const lock = T.running || pomo;
+    inp.disabled = lock;
+    editBtns.forEach(b => b.disabled = lock);
+    reset.disabled = lock;
+    stop.disabled = !T.running;
+    go.disabled = T.running || (!pomo && T.mins <= 0);
+    modeBtns.forEach(b => {
+      b.classList.toggle('on', b.dataset.m === T.mode);
+      b.disabled = b.dataset.m === 'pomo' ? T.running : (T.running && pomo);
+    });
+  };
+  const setMins = v => {
+    v = parseInt(v, 10);
+    T.mins = isNaN(v) ? 0 : Math.min(MAX_MIN, Math.max(0, v));
+    T.draw();
+  };
+  card.querySelectorAll('[data-d]').forEach(b =>
+    b.addEventListener('click', () => setMins(T.mins + parseInt(b.dataset.d, 10))));
+  inp.addEventListener('change', () => setMins(inp.value));
+  reset.addEventListener('click', () => setMins(0));
+  go.addEventListener('click', () => {
+    audio();
+    const pomo = T.mode === 'pomo';
+    if(!T.running && (pomo || T.mins > 0)){
+      T.running = true; T.warned = false; T.phase = 'work';
+      T.endAt = Date.now() + (pomo ? WORK_MIN : T.mins) * 60000;
+    }
+    T.draw();
+  });
+  stop.addEventListener('click', () => { T.running = false; T.phase = 'work'; T.draw(); });
+  modeBtns.forEach(b => b.addEventListener('click', () => { T.mode = b.dataset.m; T.draw(); }));
+
+  list.appendChild(card);
+  timers.push(T);
+  T.draw();
+}
+
+function tick(){
+  const now = Date.now();
+  timers.forEach(T => {
+    if(!T.running) return;
+    const snd = SOUND[T.mode === 'pomo' ? 'pomo' : 'normal'];
+    const rem = T.endAt - now;
+    if(rem <= 0){
+      beep(0.3, snd.end, snd.type);
+      T.warned = false;
+      if(T.mode === 'pomo'){
+        if(T.phase === 'work'){ T.phase = 'break'; T.endAt = now + BREAK_MIN * 60000; }
+        else { T.running = false; T.phase = 'work'; }
+      } else if(T.mode === 'repeat'){
+        T.endAt = now + T.mins * 60000;
+      } else {
+        T.running = false;
+      }
+    } else if(rem <= WARN_MS && !T.warned){
+      T.warned = true;
+      beep(0.3, snd.warn, snd.type);
+    }
+    T.draw();
+  });
+}
+
+for(let i = 1; i <= DEFAULT_COUNT; i++) makeTimer(i);
+document.getElementById('add').addEventListener('click', () => makeTimer(timers.length + 1));
+setInterval(tick, 200);
+</script>
+</body>
+</html>
